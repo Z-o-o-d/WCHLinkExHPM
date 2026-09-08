@@ -1,261 +1,137 @@
-# Welcome to OpenOCD
+# WCHLinkExHPM
 
-OpenOCD provides on-chip programming and debugging support with a
-layered architecture of JTAG interface and TAP support including:
+> 基于**上游 OpenOCD master**(2026-08-15 快照 `da3920b`)自编译的 OpenOCD,用于通过 **WCH-LinkE(CH347)高速 JTAG 模式** 给 **HPMicro HPM5E31 等 HPM 系列 RISC-V MCU** 烧录固件。
+>
+> 关键特性:**同时内置 `ch347` 适配器驱动与 `hpm_xpi` Flash 驱动**,实测可用 WCH-LinkE 的 JTAG 模式完整烧录 HPM5E31 的 XPI NOR Flash(`** Verified OK **`)。
 
-- (X)SVF playback to facilitate automated boundary scan and FPGA/CPLD
-  programming;
-- debug target support (e.g. ARM, MIPS): single-stepping,
-  breakpoints/watchpoints, gprof profiling, etc;
-- flash chip drivers (e.g. CFI, NAND, internal flash);
-- embedded Tcl interpreter for easy scripting.
+## 为什么需要这个仓库
 
-Several network interfaces are available for interacting with OpenOCD:
-telnet, Tcl, and GDB. The GDB server enables OpenOCD to function as a
-"remote target" for source-level debugging of embedded systems using
-the GNU GDB program (and the others who talk GDB protocol, e.g. IDA
-Pro).
+要用 **WCH-LinkE(CH347)的 JTAG 模式**直接烧录 HPM 芯片,OpenOCD 必须**同时**包含两个驱动:
 
-This README file contains an overview of the following topics:
+| 驱动 | 类型 | 作用 |
+|---|---|---|
+| `ch347` | 适配器驱动 | 让 OpenOCD 认识并驱动 CH347 / WCH-LinkE 高速 JTAG 探针(经 libusb-1.0 访问 USB) |
+| `hpm_xpi` | Flash 驱动 | 把 HPMicro BootROM 的 `rom_xpi_nor_*` 烧写算法载入芯片 RAM,完成 XPI NOR Flash 擦写(HPMicro 2025 年贡献并合入上游) |
 
-- quickstart instructions,
-- how to find and build more OpenOCD documentation,
-- list of the supported hardware,
-- the installation and build process,
-- packaging tips.
+常见的各厂商/发行版 OpenOCD 往往只满足其一(见下节对比),因此需要基于上游最新源码自行构建——本仓库即该构建产物与配套文档。
 
-## Quickstart for the impatient
+## 与其它 OpenOCD 版本的差异
 
-If you have a popular board then just start OpenOCD with its config,
-e.g.:
+| 能力 | A. HPMicro sdk_env | B. xPack 0.12.0-7 | **C. 本仓库** | D. WCH / MounRiver |
+|---|---|---|---|---|
+| `ch347` 适配器驱动 | ❌ | ✅(仅 WCH 旧式语法) | ✅(上游标准语法) | ✅(IoCHubDLL,免 WinUSB) |
+| `hpm_xpi` Flash 驱动 | ✅ | ❌(快照早于合入) | ✅ | ❌ |
+| 连 CH347(换成 WinUSB 后) | ❌ | ✅ | ✅ | ❌(与 WinUSB 互斥) |
+| 烧录 HPM5E31 | 需另配 J-Link | ❌ | ✅ 完整烧录 | ❌ |
 
-```sh
-openocd -f board/stm32f4discovery.cfg
-```
+- 上游 master 的 `src/jtag/drivers/ch347.c` 与 `src/flash/nor/hpm_xpi.c` **同时存在**,本仓库即该状态;
+- A(sdk_env,HPMicro fork)只带 `hpm_xpi`、不带 `ch347`;D(MounRiver Studio 2,WCH fork)正好相反——两家厂商 fork 都只面向自家芯片;
+- B(xPack)基于 2025-10 快照,早于 `hpm_xpi` 合入,且其 `ch347` 只支持 WCH 旧式 `ch347 vid_pid` 命令;
+- 逐版本实测过程与结论详见 [`OpenOCD对比与处理过程.md`](OpenOCD对比与处理过程.md)。
 
-If you are connecting a particular adapter with some specific target,
-you need to source both the jtag interface and the target configs,
-e.g.:
+## Release:GitHub Actions 自动编译发布
 
-```sh
-openocd -f interface/ftdi/jtagkey2.cfg -c "transport select jtag" \
-        -f target/ti/calypso.cfg
-```
+本仓库配置了 `.github/workflows/release.yml`,推送后自动在官方 runner 上构建 **四个平台** 的产物并发布:
 
-```sh
-openocd -f interface/stlink.cfg -c "transport select swd" \
-        -f target/stm32l0.cfg
-```
+- **Windows x64 / Windows x86**:Ubuntu 上用 MinGW 交叉编译,压缩包内含 `openocd.exe` + 运行库 DLL + `tcl` 脚本(解压即用);
+- **Linux / macOS**:原生编译,压缩包内为 `bin/openocd` + `share/openocd`。
 
-After OpenOCD startup, connect GDB with
+触发方式:
 
-```gdb
-(gdb) target extended-remote localhost:3333
-```
+- 推送到 `master` → 自动更新 **`latest` 预发布**;
+- 推送标签(如 `v1.0.0`,`v*`)→ 自动发布**正式 Release**,以标签命名;
+- 也可在 Actions 页面手动 `Run workflow`。
 
-## Installing OpenOCD
-
-The easiest way to install OpenOCD is through your operating system's package
-manager.
-
-- Debian / Ubuntu
-
-  ```sh
-  sudo apt install openocd
-  ```
-
-- Fedora
-
-  ```sh
-  sudo dnf install openocd
-  ```
-
-- macOS (via Homebrew)
-
-  ```sh
-  brew install open-ocd
-  ```
-
-- Windows (via MSYS2)
-
-  ```sh
-  pacman -S mingw-w64-x86_64-openocd
-  ```
-
-These packages are often more stable than the bleeding-edge Git mainline, where
-active development happens.
-"Packagers" create binary releases of OpenOCD after the developers publish new
-source code releases.
-Older OpenOCD versions are not suitable for diagnosing issues in the current
-release.
-Users should stay in touch with their distribution maintainers or interface
-vendors to ensure that appropriate updates are provided regularly.
-
-If you use one of these binary packages, you must contact the Packager for
-support or for newer binary versions.
-The OpenOCD developers do not provide direct support for packaged binaries.
-
-## A Note to OpenOCD Packagers
-
-You are a PACKAGER of OpenOCD if you:
-
-- Sell dongles and include pre-built binaries;
-- Supply tools or IDEs (a development solution integrating OpenOCD);
-- Build packages (e.g. RPM or DEB files for a GNU/Linux distribution).
-
-As a PACKAGER, you will experience first reports of most issues.
-When you fix those problems for your users, your solution may help
-prevent hundreds (if not thousands) of other questions from other users.
-
-If something does not work for you, please work to inform the OpenOCD
-developers know how to improve the system or documentation to avoid
-future problems, and follow-up to help us ensure the issue will be fully
-resolved in our future releases.
-
-That said, the OpenOCD developers would also like you to follow a few
-suggestions:
-
-- Send patches, including config files, upstream, participate in the
-  discussions;
-- Enable all the options OpenOCD supports, even those unrelated to your
-  particular hardware;
-- Use "ftdi" interface adapter driver for the FTDI-based devices.
-
-## OpenOCD Documentation
-
-In addition to the in-tree documentation, the latest manuals may be
-viewed online at the following URLs:
-
-- OpenOCD User's Guide: <http://openocd.org/doc/html/index.html>
-
-- OpenOCD Developer's Manual: <http://openocd.org/doc/doxygen/html/index.html>
-
-These reflect the latest development versions, so the following section
-introduces how to build the complete documentation from the package.
-
-For more information, refer to these documents or contact the developers
-by subscribing to the OpenOCD developer mailing list: openocd-devel@lists.sourceforge.net
-
-### Building the OpenOCD Documentation
-
-By default the OpenOCD build process prepares documentation in the
-"Info format" and installs it the standard way, so that `info openocd`
-can access it.
-
-Additionally, the OpenOCD User's Guide can be produced in the
-following different formats:
-
-If `PDFVIEWER` is set, this creates and views the PDF User Guide.
+解压后先自检两个关键驱动是否已编译进去(不报 `not found` 即通过):
 
 ```sh
-make pdf && ${PDFVIEWER} doc/openocd.pdf
+bin/openocd -c "adapter driver ch347" -c "shutdown"
+# hpm_xpi:报 "target not defined" 说明驱动已编译进去;报 "flash driver not found" 才是没编进去
+bin/openocd -c "flash bank xpi0 hpm_xpi 0x80000000 0x2000000 1 1 cpu0 0xF3000000 0x5 0x1000" -c "shutdown"
 ```
 
-If `HTMLVIEWER` is set, this creates and views the HTML User Guide.
+## 快速开始:用 WCH-LinkE 的 JTAG 模式烧录(下载)固件
+
+> 以烧录 **HPMicro HPM5E31** 的板载 XPI NOR Flash 为例。OpenOCD 采用「探针 + SoC + 板卡 Flash」三段式配置:SoC(`soc/hpm5e00.cfg`)与板卡 Flash(`hpm_xpi` bank、`init_clock`)通常来自 HPM SDK 与你的板卡目录,这里重点讲 **WCH-LinkE 探针** 侧。
+
+### 1. 把 WCH-LinkE 切到高速 JTAG 模式
+
+- WCH-LinkE 需处于 **CH347 高速 JTAG 模式**(USB 枚举为 `VID_1a86 / PID_55dd`,即 CH347 mode 3 = UART + JTAG);
+- 切换方法见 WCH 官方《WCH-Link 使用说明》(7.4 节)或 WCH-LinkUtility 工具;
+- 接线:4 线 JTAG(TMS / TCK / TDI / TDO + GND)接目标板;该接口无 SRST,复位交由 RISC-V 调试模块(`reset_config none`)。
+
+### 2. USB 驱动:把 JTAG 口(MI_02)换成 WinUSB
+
+- 本仓库 `ch347` 驱动经 **libusb-1.0** 访问 USB,Windows 下 libusb 只能打开绑定 **WinUSB / libusbK** 驱动的设备;
+- CH347 的 JTAG 口默认是 WCH 私有驱动 `CH341_A64`,必须换掉(**COM 串口那一项不要动**,操作可逆):
+  1. 打开 **Zadig**(sdk_env 自带 `tools/zadig/zadig.exe`,或官网 <https://zadig.akeo.ie/>);
+  2. `Options → List All Devices`,选择 CH347 的 **JTAG / I2C / SPI 接口**(当前驱动显示 `CH341_A64`);
+  3. 目标驱动选 **WinUSB** → `Replace Driver`;
+- 若 OpenOCD 报 `LIBUSB_ERROR_NOT_FOUND` / `CH347 not found`,基本都是这一步没做。
+
+### 3. 探针配置 `ch347.cfg`(上游版语法)
+
+```tcl
+# ch347.cfg —— WCH-LinkE(CH347)高速 JTAG 探针
+adapter driver ch347
+adapter usb vid_pid 0x1a86 0x55dd   ; 上游标准语法(不是 WCH fork 的 ch347 vid_pid)
+transport select jtag
+adapter speed 10000
+reset_config none                    ; 4 线 JTAG 无 SRST
+```
+
+### 4. 组装 SoC + Flash 配置并执行烧录
+
+把探针配置与目标芯片的 SoC / 板卡 Flash 配置组合成一个 all-in-one 配置(示例,路径以你的环境为准):
+
+```tcl
+# wchlinke.cfg
+source C:/path/to/ch347.cfg                                        ; WCH-LinkE 探针
+source C:/hpm_sdk/boards/openocd/soc/hpm5e00.cfg                   ; 创建 RISC-V 目标
+source C:/path/to/board/hpm5e31_LuckyCAT/hpm5e31_LuckyCAT.cfg      ; hpm_xpi flash bank + init_clock
+```
+
+执行烧录(`program` = 擦除 + 写入 + 校验 + 复位运行):
 
 ```sh
-make html && ${HTMLVIEWER} doc/openocd.html/index.html
+bin/openocd \
+  -s C:/hpm_sdk/boards/openocd \
+  -f build/wchlinke.cfg \
+  -c "program build/output/demo.elf verify reset exit"
 ```
 
-The OpenOCD Developer Manual contains information about the internal
-architecture and other details about the code:
+烧录成功的关键日志:
 
-Note: make sure doxygen is installed, type doxygen --version
-
-```sh
-make doxygen && ${HTMLVIEWER} doxygen/index.html
+```
+Info : CH347 ... found
+Info : JTAG tap: hpm5e00.cpu tap/device found: 0x1000563d
+** Programming Started ** / ** Programming Finished **
+** Verified OK **
+** Resetting Target **
 ```
 
-## Supported hardware
+### 常见问题
 
-### JTAG adapters
+| 现象 | 原因 / 处理 |
+|---|---|
+| `The specified adapter driver was not found (ch347)` | 所用 OpenOCD 不含 `ch347` → 改用本仓库 Release |
+| `LIBUSB_ERROR_NOT_FOUND` / `CH347 not found` | JTAG 口没换 WinUSB → 见第 2 步 |
+| `flash driver not found (hpm_xpi)` | 所用 OpenOCD 不含 `hpm_xpi` → 改用本仓库 Release |
+| 连上探针但烧录异常 | 检查板卡 cfg 中 `hpm_xpi` bank 参数与 `init_clock` |
 
-AM335x, ARM-JTAG-EW, ARM-USB-OCD, ARM-USB-TINY, AT91RM9200, axm0432, BCM2835,
-Bus Blaster, Buspirate, Cadence DPI, Cadence vdebug, Chameleon, CMSIS-DAP,
-Cortino, Cypress KitProg, DENX, Digilent JTAG-SMT2, DLC 5, DLP-USB1232H,
-embedded projects, Espressif USB JTAG Programmer,
-eStick, FlashLINK, FlossJTAG, Flyswatter, Flyswatter2,
-FTDI FT232R, Gateworks, Hoegl, ICDI, ICEBear, J-Link, JTAG VPI, JTAGkey,
-JTAGkey2, JTAG-lock-pick, KT-Link, Linux GPIOD, Lisa/L, LPC1768-Stick,
-Mellanox rshim, MiniModule, NGX, Nuvoton Nu-Link, Nu-Link2, NXHX, NXP IMX GPIO,
-OOCDLink, Opendous, OpenJTAG, Openmoko, OpenRD, OSBDM, Presto, Redbee,
-Remote Bitbang, RLink, SheevaPlug devkit, Stellaris evkits,
-ST-LINK (SWO tracing supported), STM32-PerformanceStick, STR9-comStick,
-sysfsgpio, Tigard, TI XDS110, TUMPA, Turtelizer, ULINK, USB-A9260, USB-Blaster,
-USB-JTAG, USBprog, VPACLink, VSLLink, Wiggler, XDS100v2, Xilinx XVC/PCIe,
-Xverve.
+## 相关文档
 
-### Debug targets
+- [`OpenOCD对比与处理过程.md`](OpenOCD对比与处理过程.md) —— 四个 OpenOCD 逐版本实测对比、驱动原理、自编译完整流程及待 WCH 确认问题;
+- [`test_wch_openocd.ps1`](test_wch_openocd.ps1) —— ASCII 版功能自检脚本(驱动 / 传输 / 命令识别);
+- 完整工程编译与烧录(J-Link 流程与本文差异)见 LuckyCAT 软硬件仓库《编译与烧录指南》。
 
-ARM: AArch64, ARM11, ARM7, ARM9, Cortex-A/R (v7-A/R), Cortex-M (ARMv{6/7/8}-M),
-FA526, Feroceon/Dragonite, XScale.
-ARCv2, AVR32, DSP563xx, DSP5680xx, EnSilica eSi-RISC, EJTAG (MIPS32, MIPS64),
-ESP32, ESP32-S2, ESP32-S3, Intel Quark, LS102x-SAP, RISC-V, ST STM8,
-Xtensa.
+## 本仓库相对上游的改动
 
-### Flash drivers
+相对 `openocd-org/openocd` 快照 `da3920b` 仅 5 处差异(可用 `git diff` 核对):`configure.ac`(autoconf 2.72+ 兼容修复)、新增对比文档、新增 `test_wch_openocd.ps1`、增补 `.gitignore`、`doc/openocd.info-3`。**核心源码与上游一致。**
 
-ADUC702x, AT91SAM, AT91SAM9 (NAND), ATH79, ATmega128RFA1, Atmel SAM, AVR, CFI,
-DSP5680xx, EFM32, EM357, eSi-RISC, eSi-TSMC, EZR32HG, FM3, FM4, Freedom E SPI,
-GD32, i.MX31, Kinetis, LPC8xx/LPC1xxx/LPC2xxx/LPC541xx, LPC2900, LPC3180, LPC32xx,
-LPCSPIFI, Marvell QSPI, MAX32, Milandr, MXC, NIIET, nRF51, nRF52 , NuMicro,
-NUC910, Nuvoton NPCX, onsemi RSL10, Orion/Kirkwood, PIC32mx, PSoC4/5LP/6,
-Raspberry RP2040, Renesas RPC HF and SH QSPI,
-S3C24xx, S3C6400, SiM3x, SiFive Freedom E, Stellaris, ST BlueNRG, STM32,
-STM32 QUAD/OCTO-SPI for Flash/FRAM/EEPROM, STMSMI, STR7x, STR9x, SWM050,
-TI CC13xx, TI CC26xx, TI CC32xx, TI MSP432, Winner Micro w600, Xilinx XCF,
-XMC1xxx, XMC4xxx.
+## 许可
 
-## Building OpenOCD
-
-The INSTALL file contains generic instructions for running `configure`
-and compiling the OpenOCD source code. That file is provided by
-default for all GNU autotools packages. If you are not familiar with
-the GNU autotools, then you should read those instructions first.
-
-Note: if the INSTALL file is not present, it means you are using the
-source code from a development branch, not from an OpenOCD release.
-In this case, follow the instructions 'Compiling OpenOCD' below and
-the file will be created by the first command `./bootstrap`.
-
-The remainder of this document tries to provide some instructions for
-those looking for a quick-install.
-
-### OpenOCD Dependencies
-
-GCC or Clang is currently required to build OpenOCD. The developers
-have begun to enforce strict code warnings (-Wall, -Werror, -Wextra,
-and more) and use C99-specific features: inline functions, named
-initializers, mixing declarations with code, and other tricks. While
-it may be possible to use other compilers, they must be somewhat
-modern and could require extending support to conditionally remove
-GCC-specific extensions.
-
-You'll also need:
-
-- make
-- libtool
-- pkg-config >= 0.23 or pkgconf
-- libjim >= 0.79
-
-Additionally, for building from Git:
-
-- autoconf >= 2.69
-- automake >= 1.14
-- texinfo >= 5.0
-
-Optional USB-based adapter drivers need libusb-1.0.
-
-Optional USB-Blaster, ASIX Presto and OpenJTAG interface adapter drivers need
-[libftdi](http://www.intra2net.com/en/developer/libftdi/index.php) library.
-
-Optional CMSIS-DAP adapter driver needs HIDAPI library.
-
-Optional linuxgpiod adapter driver needs libgpiod library.
-
-Optional J-Link adapter driver needs libjaylink library.
-
-Optional ARM disassembly needs capstone library.
+上游 OpenOCD 遵循 GPL-2.0-or-later,本仓库随上游许可证分发。
 
 Optional development script checkpatch needs:
 

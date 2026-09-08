@@ -1,0 +1,251 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# WCHLinkExHPM —— 自动编译并发布 Release
+#
+# 触发规则:
+#   - 推送到 master        -> 构建 Windows x64/x86 + Linux + macOS,更新 'latest' 预发布
+#   - 推送 v* 标签(如 v1.0.0) -> 构建上述全部平台,发布正式 Release(以标签命名)
+#   - 手动 workflow_dispatch -> 等同分支推送('latest' 预发布)
+#
+# 构建方式:
+#   - Windows: 在 Ubuntu 上以 MinGW(i686 / x86_64)交叉编译,依赖(libusb/hidapi/
+#     libftdi/capstone/libjaylink/jimtcl)从官方源码交叉构建,产物为
+#     openocd.exe + 运行库 DLL + tcl 脚本,解压即用(参考上游 contrib/cross-build.sh)
+#   - Linux/macOS: 在官方 runner 上原生编译(make install DESTDIR 打包)
+
+name: Build & Release
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =====================================================================
+  # Windows: MinGW 交叉编译(i686 与 x86_64 两个矩阵并行)
+  # =====================================================================
+  windows:
+    name: Windows (${{ matrix.host }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [i686-w64-mingw32, x86_64-w64-mingw32]
+    env:
+      DL_DIR: ../downloads
+      BUILD_DIR: ../build
+    steps:
+      - name: Install MinGW cross toolchain & build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autotools-dev autoconf automake libtool pkg-config \
+            cmake texinfo texlive g++-mingw-w64-i686 g++-mingw-w64-x86-64
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compute version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "OPENOCD_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          else
+            echo "OPENOCD_TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          fi
+      - name: Prepare libusb-1.0
+        run: |
+          mkdir -p "${{ env.DL_DIR }}" && cd "${{ env.DL_DIR }}"
+          wget -q https://github.com/libusb/libusb/releases/download/v1.0.26/libusb-1.0.26.tar.bz2
+          tar -xjf libusb-1.0.26.tar.bz2
+          echo "LIBUSB1_SRC=$PWD/libusb-1.0.26" >> "$GITHUB_ENV"
+      - name: Prepare hidapi
+        run: |
+          mkdir -p "${{ env.DL_DIR }}" && cd "${{ env.DL_DIR }}"
+          wget -q https://github.com/libusb/hidapi/archive/hidapi-0.13.1.tar.gz
+          tar -xzf hidapi-0.13.1.tar.gz
+          cd hidapi-hidapi-0.13.1 && ./bootstrap
+          echo "HIDAPI_SRC=$PWD" >> "$GITHUB_ENV"
+      - name: Prepare libftdi
+        run: |
+          mkdir -p "${{ env.DL_DIR }}" && cd "${{ env.DL_DIR }}"
+          wget -q https://www.intra2net.com/en/developer/libftdi/download/libftdi1-1.5.tar.bz2
+          tar -xjf libftdi1-1.5.tar.bz2
+          echo "LIBFTDI_SRC=$PWD/libftdi1-1.5" >> "$GITHUB_ENV"
+      - name: Prepare capstone
+        run: |
+          mkdir -p "${{ env.DL_DIR }}" && cd "${{ env.DL_DIR }}"
+          wget -q https://github.com/aquynh/capstone/archive/4.0.2.tar.gz
+          tar -xzf 4.0.2.tar.gz
+          echo "CAPSTONE_SRC=$PWD/capstone-4.0.2" >> "$GITHUB_ENV"
+      - name: Prepare libjaylink
+        run: |
+          mkdir -p "${{ env.DL_DIR }}" && cd "${{ env.DL_DIR }}"
+          wget -q https://gitlab.zapb.de/libjaylink/libjaylink/-/archive/0.3.1/libjaylink-0.3.1.tar.gz
+          tar -xzf libjaylink-0.3.1.tar.gz
+          cd libjaylink-0.3.1 && ./autogen.sh
+          echo "LIBJAYLINK_SRC=$PWD" >> "$GITHUB_ENV"
+      - name: Prepare jimtcl
+        run: |
+          mkdir -p "${{ env.DL_DIR }}" && cd "${{ env.DL_DIR }}"
+          wget -q https://github.com/msteveb/jimtcl/archive/refs/tags/0.83.tar.gz
+          tar -xzf 0.83.tar.gz
+          echo "JIMTCL_SRC=$PWD/jimtcl-0.83" >> "$GITHUB_ENV"
+      - name: Cross build & package
+        env:
+          OPENOCD_SRC: ${{ github.workspace }}
+          OPENOCD_CONFIG: ""
+          MAKE_JOBS: 2
+          LIBUSB1_CONFIG: --enable-shared --disable-static
+          HIDAPI_CONFIG: --enable-shared --disable-static --disable-testgui
+          LIBFTDI_CONFIG: -DSTATICLIBS=OFF -DEXAMPLES=OFF -DFTDI_EEPROM=OFF
+          CAPSTONE_CONFIG: "CAPSTONE_BUILD_CORE_ONLY=yes CAPSTONE_STATIC=yes CAPSTONE_SHARED=no"
+          LIBJAYLINK_CONFIG: --enable-shared --disable-static
+          JIMTCL_CONFIG: --with-ext=json --minimal --disable-ssl
+        run: |
+          cd "${{ github.workspace }}" && ./bootstrap
+          mkdir -p "${{ env.BUILD_DIR }}" && cd "${{ env.BUILD_DIR }}"
+          bash "${{ github.workspace }}/contrib/cross-build.sh" "${{ matrix.host }}"
+          # 补充 MinGW 运行时 DLL(libusb 等依赖 DLL 已由交叉构建装入 usr/bin)
+          cd "${{ matrix.host }}-root/usr"
+          for dll in libwinpthread-1.dll libgcc_s_dw2-1.dll libgcc_s_seh-1.dll; do
+            f="$("${{ matrix.host }}-gcc" --print-file-name=$dll 2>/dev/null)" || true
+            [ -n "$f" ] && [ -f "$f" ] && cp "$f" ./bin/ || true
+          done
+          tar -czf "$GITHUB_WORKSPACE/openocd-${OPENOCD_TAG}-${{ matrix.host }}.tar.gz" *
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openocd-${{ matrix.host }}
+          path: openocd-*.tar.gz
+          if-no-files-found: error
+
+  # =====================================================================
+  # Linux x86_64: 原生编译
+  # =====================================================================
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf automake libtool pkg-config make gcc g++ \
+            texinfo libusb-1.0-0-dev libftdi1-dev libhidapi-dev libgpiod-dev
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Init jimtcl submodule
+        run: git submodule update --init jimtcl
+      - name: Compute version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "OPENOCD_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          else
+            echo "OPENOCD_TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          fi
+      - name: Bootstrap & configure
+        run: |
+          ./bootstrap
+          ./configure --prefix=/usr --disable-werror
+      - name: Build & install to staging dir
+        run: |
+          make -j"$(nproc)"
+          make install DESTDIR="$PWD/pkg"
+      - name: Package
+        run: |
+          cd pkg
+          tar -czf "$GITHUB_WORKSPACE/openocd-${OPENOCD_TAG}-linux-$(uname -m).tar.gz" *
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openocd-linux
+          path: openocd-*.tar.gz
+          if-no-files-found: error
+
+  # =====================================================================
+  # macOS: 原生编译(arm64 runner)
+  # =====================================================================
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - name: Install build tools (Homebrew)
+        run: |
+          brew install autoconf automake libtool pkg-config make texinfo \
+            libusb libftdi hidapi
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Init jimtcl submodule
+        run: git submodule update --init jimtcl
+      - name: Compute version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "OPENOCD_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          else
+            echo "OPENOCD_TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          fi
+      - name: Bootstrap & configure
+        run: |
+          ./bootstrap
+          ./configure --prefix=/usr --disable-werror
+      - name: Build & install to staging dir (GNU make)
+        run: |
+          gmake -j"$(sysctl -n hw.ncpu)"
+          gmake install DESTDIR="$PWD/pkg"
+      - name: Package
+        run: |
+          cd pkg
+          tar -czf "$GITHUB_WORKSPACE/openocd-${OPENOCD_TAG}-macos-$(uname -m).tar.gz" *
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openocd-macos
+          path: openocd-*.tar.gz
+          if-no-files-found: error
+
+  # =====================================================================
+  # Publish: 汇总所有平台产物并创建 / 更新 GitHub Release
+  # =====================================================================
+  publish:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: [windows, linux, macos]
+    steps:
+      - name: Compute release name
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "RELEASE_NAME=${{ github.ref_name }}" >> "$GITHUB_ENV"
+            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
+            echo "RELEASE_BODY=WCHLinkExHPM OpenOCD 正式发布(commit ${{ github.sha }})" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_NAME=latest" >> "$GITHUB_ENV"
+            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
+            echo "RELEASE_BODY=WCHLinkExHPM OpenOCD 最新自动构建(commit ${{ github.sha }})。内含 ch347 适配器驱动与 hpm_xpi Flash 驱动,配合 WCH-LinkE(CH347) JTAG 模式烧录 HPM 系列芯片。" >> "$GITHUB_ENV"
+          fi
+      - name: Delete previous 'latest' tag & release
+        if: github.ref_type != 'tag'
+        continue-on-error: true
+        uses: dev-drprasad/delete-tag-and-release@v1.1
+        with:
+          delete_release: true
+          tag_name: latest
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+      - name: Create / update Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.RELEASE_NAME }}
+          commit: ${{ github.sha }}
+          name: ${{ env.RELEASE_NAME }}
+          body: ${{ env.RELEASE_BODY }}
+          artifacts: "assets/*/*.tar.gz"
+          allowUpdates: true
+          prerelease: ${{ env.IS_PRERELEASE }}
+          token: ${{ secrets.GITHUB_TOKEN }}
