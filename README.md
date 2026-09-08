@@ -119,6 +119,67 @@ Info : JTAG tap: hpm5e00.cpu tap/device found: 0x1000563d
 | `flash driver not found (hpm_xpi)` | 所用 OpenOCD 不含 `hpm_xpi` → 改用本仓库 Release |
 | 连上探针但烧录异常 | 检查板卡 cfg 中 `hpm_xpi` bank 参数与 `init_clock` |
 
+## 完整案例:`demo/1_led_blink`(HPM SDK + `make flash` 一键烧录)
+
+上面的第 4 节是通用写法,这里给一个**可直接照抄的真实工程** —— LuckyCAT 软硬件仓库中的 `demo/1_led_blink`(GPIO 点灯,板载 LED 闪烁),其 `Makefile` 已默认配置为 **WCH-LinkE(CH347)JTAG 模式** 下载固件:
+
+```
+demo/1_led_blink/
+├── CMakeLists.txt     # find_package(hpm-sdk); sdk_app_src(src/led_blink.c)
+├── Makefile           # make build / make flash / make all / make clean
+└── src/led_blink.c    # GPIO 输出
+```
+
+Makefile 中的关键可配置项(默认即 CH347 方案):
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PROBE` | `wchlinke` | 探针:`make flash PROBE=jlink` / `PROBE=cmsis-dap` 可切换 |
+| `OPENOCD` | `C:/TOOLs/openocd/openocd.exe` | 本仓库 Release 解压出的全驱动 openocd(与 `ch347.cfg` 同目录) |
+| `BOARD` | `hpm5e31_LuckyCAT` | 自定义板卡名 |
+| `BOARD_SEARCH_PATH` | `../../board` | 自定义板卡目录 |
+| `BUILD_TYPE` | `flash_xip` | 构建类型(SPI Flash 就地执行) |
+
+`make build` 实际执行(CMake + Ninja,产出 `build/output/demo.elf`):
+
+```sh
+cmake -GNinja -S . -B build \
+  -DBOARD=hpm5e31_LuckyCAT \
+  -DBOARD_SEARCH_PATH=../../board \
+  -DHPM_BUILD_TYPE=flash_xip \
+  -DCMAKE_MAKE_PROGRAM=<sdk>/tools/ninja/ninja
+ninja -C build
+```
+
+Makefile 生成的组合配置 `build/wchlinke.cfg`(即上文「探针 + SoC + 板卡」三段式):
+
+```tcl
+set HPM_SDK_BASE C:/TOOLs/sdk_env_v1.12.1/hpm_sdk
+source C:/TOOLs/openocd/ch347.cfg                                      ; ① WCH-LinkE(CH347)探针
+source C:/TOOLs/sdk_env_v1.12.1/hpm_sdk/boards/openocd/soc/hpm5e00.cfg ; ② SoC:RISC-V 目标
+source <工程>/board/hpm5e31_LuckyCAT/hpm5e31_LuckyCAT.cfg              ; ③ 板卡:hpm_xpi flash bank + init_clock
+```
+
+一键烧录(WCH-LinkE JTAG 模式下载固件):
+
+```sh
+make build      # 编译
+make flash      # 用 CH347 / WCH-LinkE 烧录(默认 PROBE=wchlinke)
+# 对比:make flash PROBE=jlink —— 切回 J-Link 流程
+```
+
+`make flash` 展开后的实际命令:
+
+```sh
+C:/TOOLs/openocd/openocd.exe \
+  -s C:/TOOLs/sdk_env_v1.12.1/tools/openocd/tcl \
+  -s C:/TOOLs/sdk_env_v1.12.1/hpm_sdk/boards/openocd \
+  -f C:/TOOLs/openocd/wchlinke.cfg \
+  -c "program build/output/demo.elf verify reset exit"
+```
+
+成功标志:`** Verified OK **` 后出现 `target reset and running`,板载 LED 开始闪烁。需要复用到其它 demo 时,把该 `Makefile` 复制过去、保持 `board/` 与 `sdk_env` 路径一致即可(有多个子工程时用 `make build SRC_DIR=<子目录>` 指定)。
+
 ## 相关文档
 
 - [`OpenOCD对比与处理过程.md`](OpenOCD对比与处理过程.md) —— 四个 OpenOCD 逐版本实测对比、驱动原理、自编译完整流程及待 WCH 确认问题;

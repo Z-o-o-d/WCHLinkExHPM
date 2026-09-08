@@ -147,10 +147,10 @@ jobs:
           else
             echo "OPENOCD_TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           fi
-      - name: Bootstrap & configure
+      - name: Bootstrap & configure (build internal jimtcl from submodule)
         run: |
           ./bootstrap
-          ./configure --prefix=/usr --disable-werror
+          ./configure --prefix=/usr --disable-werror --enable-internal-jimtcl
       - name: Build & install to staging dir
         run: |
           make -j"$(nproc)"
@@ -188,10 +188,14 @@ jobs:
           else
             echo "OPENOCD_TAG=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
           fi
-      - name: Bootstrap & configure
+      - name: Add Homebrew keg-only tools to PATH (libtool/texinfo)
+        run: |
+          echo "$(brew --prefix)/opt/libtool/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix)/opt/texinfo/bin" >> "$GITHUB_PATH"
+      - name: Bootstrap & configure (build internal jimtcl from submodule)
         run: |
           ./bootstrap
-          ./configure --prefix=/usr --disable-werror
+          ./configure --prefix=/usr --disable-werror --enable-internal-jimtcl
       - name: Build & install to staging dir (GNU make)
         run: |
           gmake -j"$(sysctl -n hw.ncpu)"
@@ -214,6 +218,8 @@ jobs:
     name: Publish Release
     runs-on: ubuntu-latest
     needs: [windows, linux, macos]
+    # 即使个别平台构建失败,只要有成功产物就照样发布(不要求全平台成功)
+    if: always()
     steps:
       - name: Compute release name
         run: |
@@ -234,11 +240,37 @@ jobs:
           delete_release: true
           tag_name: latest
           github_token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Download build artifacts
+      # 逐平台下载:某平台失败/无产物则跳过该文件,不阻塞发布
+      - name: Download Windows x86
+        if: always()
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
+          name: openocd-i686-w64-mingw32
+          path: assets
+      - name: Download Windows x64
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: openocd-x86_64-w64-mingw32
+          path: assets
+      - name: Download Linux
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: openocd-linux
+          path: assets
+      - name: Download macOS
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: openocd-macos
           path: assets
       - name: Create / update Release
+        if: always() && hashFiles('assets/**/*.tar.gz') != ''
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ env.RELEASE_NAME }}
