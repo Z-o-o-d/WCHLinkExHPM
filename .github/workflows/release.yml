@@ -232,14 +232,23 @@ jobs:
             echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
             echo "RELEASE_BODY=WCHLinkExHPM OpenOCD 最新自动构建(commit ${{ github.sha }})。内含 ch347 适配器驱动与 hpm_xpi Flash 驱动,配合 WCH-LinkE(CH347) JTAG 模式烧录 HPM 系列芯片。" >> "$GITHUB_ENV"
           fi
-      - name: Delete previous 'latest' tag & release
+      - name: Delete previous 'latest' tag & release (仅当存在)
         if: github.ref_type != 'tag'
-        continue-on-error: true
-        uses: dev-drprasad/delete-tag-and-release@v1.1
-        with:
-          delete_release: true
-          tag_name: latest
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo="${{ github.repository }}"
+          # 查询 'latest' 的 release id;不存在时跳过,避免首次发布报 "Reference does not exist"
+          rid="$(gh api "repos/$repo/releases/tags/latest" --jq .id 2>/dev/null || true)"
+          if [ -n "$rid" ] && [ "$rid" != "null" ]; then
+            echo "deleting existing 'latest' release (id=$rid)"
+            gh api -X DELETE "repos/$repo/releases/$rid" >/dev/null || true
+          fi
+          # 存在同名 tag 则删除
+          if gh api "repos/$repo/git/ref/tags/latest" >/dev/null 2>&1; then
+            echo "deleting existing 'latest' tag"
+            gh api -X DELETE "repos/$repo/git/refs/tags/latest" >/dev/null || true
+          fi
       # 逐平台下载:某平台失败/无产物则跳过该文件,不阻塞发布
       - name: Download Windows x86
         if: always()
