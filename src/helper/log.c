@@ -23,14 +23,64 @@
 #include <server/server.h>
 
 #include <stdarg.h>
+#include <string.h>
 
 #if defined(HAVE_MALLINFO) || defined(HAVE_MALLINFO2)
 #include <malloc.h>
 #endif
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 int debug_level = LOG_LVL_INFO;
 
 static FILE *log_output;
+
+/* ---- colored console output (optional enhancement) ---- */
+#define OCD_COLOR_RESET  "\033[0m"
+#define OCD_COLOR_RED    "\033[91m"
+#define OCD_COLOR_GREEN  "\033[92m"
+#define OCD_COLOR_YELLOW "\033[93m"
+#define OCD_COLOR_CYAN   "\033[96m"
+#define OCD_COLOR_DIM    "\033[90m"
+
+static const char *log_line_color(const char *prefix, const char *msg)
+{
+	if (!msg)
+		msg = "";
+
+	if (strstr(prefix, "Error:") || strstr(msg, "Error:"))
+		return OCD_COLOR_RED;
+	if (strstr(prefix, "Warn :") || strstr(msg, "Warn :"))
+		return OCD_COLOR_YELLOW;
+	if (strstr(prefix, "Info :") || strstr(msg, "Info :"))
+		return OCD_COLOR_CYAN;
+	if (strstr(prefix, "Debug:") || strstr(msg, "Debug:"))
+		return OCD_COLOR_DIM;
+	/* highlight success/progress markers */
+	if (strstr(msg, "Programming") || strstr(msg, "Verified OK") ||
+		strstr(msg, "Resetting Target") || strstr(msg, "erased address") ||
+		strstr(msg, "Flash done") || strstr(msg, "Build OK"))
+		return OCD_COLOR_GREEN;
+
+	return NULL;
+}
+
+/* only colorize when logging to a real console, not to a file or a pipe */
+static int log_console_color_enabled(void)
+{
+	if (log_output != stderr)
+		return 0;
+#ifdef _WIN32
+	return _isatty(_fileno(stderr)) != 0;
+#else
+	return isatty(fileno(stderr)) != 0;
+#endif
+}
+
 static struct log_callback *log_callbacks;
 
 static int64_t last_time;
@@ -105,6 +155,7 @@ static void log_puts(enum log_levels level,
 	const char *string)
 {
 	const char *f;
+	const int use_color = log_console_color_enabled();
 
 	if (!log_output) {
 		/* log_init() not called yet; print on stderr */
@@ -115,6 +166,16 @@ static void log_puts(enum log_levels level,
 
 	if (level == LOG_LVL_OUTPUT) {
 		/* do not prepend any headers, just print out what we were given and return */
+		size_t slen = strlen(string);
+		if (use_color && slen > 0 && string[slen - 1] == '\n') {
+			const char *color = log_line_color("", string);
+			if (color) {
+				fwrite(string, 1, slen - 1, log_output);
+				fputs(OCD_COLOR_RESET "\n", log_output);
+				fflush(log_output);
+				return;
+			}
+		}
 		fputs(string, log_output);
 		fflush(log_output);
 		return;
@@ -137,8 +198,22 @@ static void log_puts(enum log_levels level,
 	} else {
 		/* if we are using gdb through pipes then we do not want any output
 		 * to the pipe otherwise we get repeated strings */
-		fprintf(log_output, "%s%s",
-			(level > LOG_LVL_USER) ? log_strings[level + 1] : "", string);
+		const char *prefix = (level > LOG_LVL_USER) ? log_strings[level + 1] : "";
+		const char *color = use_color ? log_line_color(prefix, string) : NULL;
+		size_t slen = strlen(string);
+		int has_nl = (slen > 0 && string[slen - 1] == '\n');
+		size_t body_len = has_nl ? (slen - 1) : slen;
+
+		if (color)
+			fputs(color, log_output);
+		if (prefix[0])
+			fputs(prefix, log_output);
+		if (body_len > 0)
+			fwrite(string, 1, body_len, log_output);
+		if (color)
+			fputs(OCD_COLOR_RESET, log_output);
+		if (has_nl)
+			fputc('\n', log_output);
 	}
 
 	fflush(log_output);
